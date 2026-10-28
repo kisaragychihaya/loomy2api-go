@@ -1,0 +1,332 @@
+<div class="docs">
+<p class="d-lead">loomy2api（Go 版）把 Loomy（讯飞）账号的模型额度转成一套本地自托管的 <strong>OpenAI / Anthropic 兼容 API</strong>：纯 Go 1.27 标准库、零第三方依赖、编译成单个二进制，自带多账号池、自动续期与 Web 控制面板。本页是编译进二进制的离线手册，装好后不联网也能查。</p>
+
+<h2 id="d-quickstart">快速开始</h2>
+
+<h3 id="d-get-binary">1. 拿到二进制</h3>
+<p>从源码构建，或到项目的 Release 页下载对应平台的预编译包（<span class="d-code">linux/amd64</span>、<span class="d-code">linux/arm64</span>、<span class="d-code">darwin/amd64</span>、<span class="d-code">darwin/arm64</span>、<span class="d-code">windows/amd64</span>、<span class="d-code">windows/arm64</span>）：</p>
+<pre>go build -o loomy2api ./cmd/loomy2api        # Windows 上产物是 loomy2api.exe</pre>
+<p>二进制是静态链接的（<span class="d-code">CGO_ENABLED=0</span>），目标机器不需要装 Go，也不需要任何 Python 运行时或第三方包。校验下载可以用 Release 附带的 <span class="d-code">SHA256SUMS.txt</span>：</p>
+<pre>sha256sum -c SHA256SUMS.txt          # Linux / macOS
+certutil -hashfile loomy2api.exe SHA256   # Windows</pre>
+
+<h3 id="d-first-run">2. 首次运行</h3>
+<pre>./loomy2api                 # 不带参数等价于 ./loomy2api serve，默认 http://127.0.0.1:17890</pre>
+<p>首次启动时若 <span class="d-code">config.json</span> 不存在（默认 <span class="d-code">./config.json</span>，或 <span class="d-code">-c/--config</span> 指定的路径），程序会先自动生成一份带注释的默认配置再继续加载 —— 所有子命令都是这个行为，所以第一次跑任何命令都会看到「已创建默认配置」。</p>
+<p>优先级是 <strong>环境变量 &gt; config.json &gt; 内置默认值</strong>，配置里的相对路径相对 config.json 所在目录解析。默认配置模板编进二进制（内容同仓库里的 <span class="d-code">config.example.json</span>），改模板要重新编译。</p>
+
+<h3 id="d-first-account">3. 添加第一个账号</h3>
+<pre>./loomy2api add main --phone 13800000000 --password '你的密码'
+./loomy2api accounts          # 确认 session 剩余天数与额度
+./loomy2api serve             # http://127.0.0.1:17890，面板在 /panel</pre>
+<p>密码需要先在<strong>讯飞账号中心</strong>（网页或手机端）设置一次 —— 桌面客户端里没有「设置密码」入口。没有密码也能用，见下面的短信登录。添加成功后账号与 session 会写进 <span class="d-code">accounts.json</span>（该文件已在 <span class="d-code">.gitignore</span> 里）。</p>
+
+<h3 id="d-cli">4. 常用命令</h3>
+<p>全局参数 <span class="d-code">-c/--config &lt;path&gt;</span> 写在子命令之前；每个子命令都支持 <span class="d-code">--help</span>。</p>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>命令</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">serve</span></td><td>启动网关（<span class="d-code">--port</span> 覆盖配置端口；不带子命令时默认就是它）</td></tr>
+<tr><td><span class="d-code">accounts</span> / <span class="d-code">quota</span></td><td>账号池状态 / 各账号积分</td></tr>
+<tr><td><span class="d-code">add</span> / <span class="d-code">remove</span></td><td>加账号 / 删账号（<span class="d-code">remove</span> 无 <span class="d-code">-y</span> 时会问一次）</td></tr>
+<tr><td><span class="d-code">login [name ...]</span></td><td>强制重登并续期（缺省=全部）</td></tr>
+<tr><td><span class="d-code">sms</span> / <span class="d-code">verify</span></td><td>短信登录两步：发码 → 用验证码换 session</td></tr>
+<tr><td><span class="d-code">identity &lt;name&gt;</span></td><td>查看设备标识（<span class="d-code">--rebind</span> 换新设备并重登）</td></tr>
+<tr><td><span class="d-code">models</span> / <span class="d-code">chat "prompt"</span></td><td>列上游模型 / 单次对话自检</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="d-accounts">添加账号</h2>
+<p>三种方式任选，最后都落到同一个 <span class="d-code">accounts.json</span>。</p>
+
+<h3 id="d-account-password">手机号 + 密码（推荐）</h3>
+<pre>./loomy2api add main --phone 13800000000 --password '你的密码'</pre>
+<p>这是唯一能<strong>自动续期</strong>的形态：后台每隔 <span class="d-code">quota_refresh_minutes</span> 巡检一次，session 剩余不足 <span class="d-code">session_renew_before_days</span>（默认 3 天）就自动重登，账号池可以长期无人值守。</p>
+
+<h3 id="d-account-sms">短信登录（没有密码时）</h3>
+<pre>./loomy2api sms 13800000000                 # 发验证码，记下输出里的 msgid
+./loomy2api verify main 13800000000 &lt;验证码&gt; &lt;msgid&gt;</pre>
+<p>两步都在同一台机器上执行、不要间隔太久；<span class="d-code">verify</span> 成功后 session 同样写进 <span class="d-code">accounts.json</span>。这种账号没有密码，14 天到期后需要重新走一遍（或先到账号中心设密码，再改成密码账号）。</p>
+
+<h3 id="d-account-session">导入客户端会话 / 手写 accounts.json</h3>
+<p>本机装了并登录了 Loomy 桌面客户端时，<span class="d-code">sessions_from_client: true</span>（默认开）会自动把客户端的会话当作一个额外账号拾取进来，不需要手工干预。也可以直接写文件：</p>
+<pre>{
+  "accounts": [
+    { "name": "main",   "loginid": "13800000000", "password": "…", "enabled": true },
+    { "name": "backup", "loginid": "13900000000", "password": "…", "enabled": true },
+    { "name": "shared", "session": "&lt;32 位 session&gt;", "userid": "…", "expireAt": 0 }
+  ]
+}</pre>
+<p>只有 <span class="d-code">session</span> 的账号无法自动续期（14 天后失效），适合临时借用；<span class="d-code">enabled: false</span> 可以保留配置但暂时不参与路由。文件里可能有明文密码与绑定好的设备标识，注意权限：</p>
+<pre>chmod 600 accounts.json config.json</pre>
+
+<h2 id="d-config">配置</h2>
+<p><span class="d-code">config.json</span> 里所有键都是可选的，缺省值见 <span class="d-code">config.example.json</span> 的注释；环境变量覆盖同名配置。</p>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>键</th><th>默认</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">host</span> / <span class="d-code">port</span></td><td>127.0.0.1 / 17890</td><td>监听地址；改成 0.0.0.0 才会对局域网开放</td></tr>
+<tr><td><span class="d-code">upstream</span></td><td>https://loomyad.xunfei.cn/api/v1</td><td>模型网关地址</td></tr>
+<tr><td><span class="d-code">account_base</span></td><td>https://account.xfinfr.com</td><td>账号服务地址</td></tr>
+<tr><td><span class="d-code">access_key_id</span> / <span class="d-code">access_key_secret</span></td><td>空</td><td>留空用官方客户端内置的签名常量；只有客户端换了密钥对才需要覆盖</td></tr>
+<tr><td><span class="d-code">proxy</span></td><td>空</td><td>如 http://127.0.0.1:7877；空=直连（这几个域名建议直连）</td></tr>
+<tr><td><span class="d-code">api_keys</span></td><td>[]</td><td>空=网关不鉴权；非空则要求 Bearer / x-api-key</td></tr>
+<tr><td><span class="d-code">default_model</span></td><td>deepseek-v4-flash-0731</td><td>请求没带 model 时的兜底</td></tr>
+<tr><td><span class="d-code">timeout</span></td><td>1200</td><td>整体超时（秒），流式只卡响应头</td></tr>
+<tr><td><span class="d-code">log_dir</span> / <span class="d-code">log_requests</span> / <span class="d-code">log_console</span></td><td>logs / true / true</td><td>请求日志（模型、token、扣分、延迟）落盘与终端输出</td></tr>
+<tr><td><span class="d-code">strip_model_prefix</span></td><td>true</td><td>去掉 model 里的 <span class="d-code">provider/</span> 前缀</td></tr>
+<tr><td><span class="d-code">accounts_file</span></td><td>accounts.json</td><td>账号文件；相对路径相对 config.json 所在目录</td></tr>
+<tr><td><span class="d-code">strategy</span></td><td>balance</td><td>balance / round_robin / lru</td></tr>
+<tr><td><span class="d-code">identity_mode</span></td><td>per_account</td><td>per_account / client（见「多账号池」）</td></tr>
+<tr><td><span class="d-code">max_retries</span></td><td>2</td><td>失败后换账号重试的次数</td></tr>
+<tr><td><span class="d-code">cooldown_seconds</span></td><td>300</td><td>额度耗尽/402 后账号冷却时长</td></tr>
+<tr><td><span class="d-code">session_renew_before_days</span></td><td>3</td><td>session 剩余不足 N 天就提前续期</td></tr>
+<tr><td><span class="d-code">quota_refresh_minutes</span></td><td>30</td><td>额度缓存与后台巡检间隔</td></tr>
+<tr><td><span class="d-code">sessions_from_client</span></td><td>true</td><td>是否自动导入本机客户端会话</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="d-env">环境变量</h3>
+<p>环境变量优先于 config.json，适合容器与服务单元里注入，避免把密钥写进文件。</p>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>变量</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">LOOMY_HOST</span> / <span class="d-code">LOOMY_PORT</span></td><td>监听地址与端口</td></tr>
+<tr><td><span class="d-code">LOOMY_UPSTREAM</span></td><td>模型网关 base URL</td></tr>
+<tr><td><span class="d-code">LOOMY_ACCOUNT_BASE</span></td><td>账号服务 base URL</td></tr>
+<tr><td><span class="d-code">LOOMY_AK_ID</span> / <span class="d-code">LOOMY_AK_SECRET</span></td><td>覆盖内置签名密钥对</td></tr>
+<tr><td><span class="d-code">LOOMY_API_KEYS</span></td><td>逗号分隔的网关密钥；空=不鉴权</td></tr>
+<tr><td><span class="d-code">LOOMY_DEFAULT_MODEL</span></td><td>兜底模型 id</td></tr>
+<tr><td><span class="d-code">LOOMY_PROXY</span></td><td>HTTP 代理地址；缺省直连</td></tr>
+<tr><td><span class="d-code">LOOMY_ACCOUNTS_FILE</span></td><td>账号文件路径</td></tr>
+<tr><td><span class="d-code">LOOMY_LOG_DIR</span></td><td>日志目录</td></tr>
+<tr><td><span class="d-code">LOOMY_STRATEGY</span></td><td>balance / round_robin / lru</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="d-protect">给网关加一层钥匙</h3>
+<pre>{ "api_keys": ["sk-local-whatever"] }</pre>
+<p>之后再启动，客户端要带 <span class="d-code">Authorization: Bearer sk-local-whatever</span> 或 <span class="d-code">x-api-key: sk-local-whatever</span>。<span class="d-code">/health</span> 始终公开，方便探活；面板页面本身也公开（好让你输入密钥），但面板的 <span class="d-code">/api/panel/*</span> 全部需要密钥。面板改完 config.json 可以点「重载配置」热载，不必重启。</p>
+
+<h2 id="d-pool">多账号池与路由</h2>
+<p>每个账号在 <span class="d-code">accounts.json</span> 里带自己的 session、额度缓存与设备标识；请求在池内按策略挑号。</p>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>strategy</th><th>行为</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">balance</span>（默认）</td><td>用可用积分最多的账号</td></tr>
+<tr><td><span class="d-code">round_robin</span></td><td>按顺序轮着用</td></tr>
+<tr><td><span class="d-code">lru</span></td><td>最久未用优先</td></tr>
+</tbody>
+</table>
+</div>
+<p>失败处理：<strong>401/403</strong> 丢弃该账号的 session；<strong>402 / 额度耗尽</strong> 让账号冷却 <span class="d-code">cooldown_seconds</span> 秒；两种情况都会自动换下一个账号重试，最多 <span class="d-code">max_retries</span> 次。上游 5xx 不冷却账号。状态都能在 <span class="d-code">GET /v1/admin/accounts</span>、<span class="d-code">GET /v1/points</span> 与面板总览里看到。</p>
+
+<h3 id="d-identity">设备标识</h3>
+<p>每个账号首次登录时生成一套自己的设备标识并绑定进 accounts.json（<span class="d-code">devid</span>、<span class="d-code">ua</span>、<span class="d-code">modelid</span>、校园设备号），之后每次续期与请求都复用它，避免一个池子里所有账号都自报同一个 <span class="d-code">devid: web</span>。</p>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>identity_mode</th><th>行为</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">per_account</span>（默认）</td><td>每个账号独立的 <span class="d-code">devid</span>（web-&lt;16 hex&gt;）与校园设备号；ua/modelid/version 保持真实客户端值</td></tr>
+<tr><td><span class="d-code">client</span></td><td>逐字节对齐官方客户端（<span class="d-code">devid: web</span>）</td></tr>
+</tbody>
+</table>
+</div>
+<p>换标识：面板上点「换标识」，或 <span class="d-code">./loomy2api identity main --rebind</span>，或 <span class="d-code">POST /api/panel/accounts/identity</span> 带 <span class="d-code">{"name": "main", "regenerate": true}</span>。换完会立刻用新标识重登一次。提醒一句：这只能做账号隔离，改不了你的出口 IP。</p>
+
+<h2 id="d-api">API 用法</h2>
+<p>两种方言同时可用，路径与官方一致；模型 id 原样透传给上游，没有别名表（只去掉 <span class="d-code">provider/</span> 前缀）。</p>
+
+<h3 id="d-openai">OpenAI 方言</h3>
+<pre>curl http://127.0.0.1:17890/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer not-needed' \
+  -d '{"model": "deepseek-v4-flash-0731",
+       "messages": [{"role": "user", "content": "hello"}]}'</pre>
+<p>加上 <span class="d-code">"stream": true</span> 就是 SSE 流式（<span class="d-code">data:</span> 帧，末尾 <span class="d-code">[DONE]</span>）。Python SDK：</p>
+<pre>from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:17890/v1", api_key="not-needed")
+print(client.chat.completions.create(
+    model="deepseek-v4-flash-0731",          # 见 GET /v1/models
+    messages=[{"role": "user", "content": "hi"}],
+).choices[0].message.content)</pre>
+
+<h3 id="d-anthropic">Anthropic 方言</h3>
+<pre>curl http://127.0.0.1:17890/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'x-api-key: not-needed' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model": "deepseek-v4-flash-0731", "max_tokens": 256,
+       "messages": [{"role": "user", "content": "hello"}]}'</pre>
+<p>thinking 块、tool use / tool result 都会被翻译。Claude Code 这类客户端注意 <strong>base URL 填裸 host</strong>（<span class="d-code">/v1/messages</span> 挂在根上，和真 API 一样），不要带 <span class="d-code">/v1</span>：</p>
+<pre>export ANTHROPIC_BASE_URL=http://127.0.0.1:17890
+export ANTHROPIC_API_KEY=not-needed</pre>
+
+<h3 id="d-endpoints">端点一览</h3>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>端点</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><span class="d-code">POST /v1/chat/completions</span></td><td>OpenAI 兼容，流式 + 非流式</td></tr>
+<tr><td><span class="d-code">POST /v1/messages</span></td><td>Anthropic 兼容，流式 + 非流式</td></tr>
+<tr><td><span class="d-code">GET /v1/models</span></td><td>上游模型目录</td></tr>
+<tr><td><span class="d-code">POST /v1/embeddings</span> / <span class="d-code">POST /v1/images/generations</span></td><td>透传上游</td></tr>
+<tr><td><span class="d-code">GET /v1/points</span></td><td>各账号积分（按 userid 去重合计）</td></tr>
+<tr><td><span class="d-code">GET /health</span></td><td>探活：状态、可用账号数、模型数</td></tr>
+<tr><td><span class="d-code">GET /panel</span>（及 <span class="d-code">/</span>）</td><td>Web 控制面板</td></tr>
+<tr><td><span class="d-code">GET /api/panel/state</span> · <span class="d-code">/logs</span> · <span class="d-code">/models</span> · <span class="d-code">/docs</span></td><td>面板 JSON API（启用 api_keys 后需鉴权）</td></tr>
+</tbody>
+</table>
+</div>
+<p>模型 id 的行为值得记一笔：上游对不认识的 id <strong>不报错</strong>，而是静默回落到 <span class="d-code">deepseek-v4-flash-0731</span>。所以拿到响应先看 <span class="d-code">model</span> 字段，对不上就说明这个名字上游没有。</p>
+
+<h2 id="d-panel">Web 面板</h2>
+<p>打开 <span class="d-code">http://127.0.0.1:17890/panel</span>（裸 host 也是面板），六个页签：总览、添加账号、日志、模型、文档、接口速查。</p>
+<ul>
+<li><strong>总览</strong>：每个账号的可用积分（余额 + 每日赠额）、session 剩余天数、请求与扣分计数、冷却状态、设备标识；行内按钮可续期 / 换标识 / 禁用启用 / 删除。</li>
+<li><strong>添加账号</strong>：手机号 + 密码（添加后立即登录），或直接粘一个 session。</li>
+<li><strong>日志</strong>：网关请求日志的实时尾部（模型、token、扣分、延迟），按行高亮错误与警告。</li>
+<li><strong>模型</strong>：上游目录，带积分倍率、上下文长度、能力标签与搜索排序。</li>
+<li><strong>文档</strong>：就是本页，内容编译在二进制里，不依赖外网。</li>
+<li><strong>接口速查</strong>：一屏看完所有端点。</li>
+</ul>
+<p>右上角还有「刷新额度」（强制重拉所有账号积分）、「重载配置」（热载 config.json）、自动刷新开关与明暗主题切换。启用了 <span class="d-code">api_keys</span> 时页面会先弹一个密钥框，密钥存在浏览器 localStorage 里，「登出」只清本机。</p>
+
+<h2 id="d-deploy">部署</h2>
+
+<h3 id="d-deploy-linux">Linux（systemd）</h3>
+<p>把二进制放到 <span class="d-code">/opt/loomy2api/</span>，和 <span class="d-code">config.json</span>、<span class="d-code">accounts.json</span> 放一起，然后：</p>
+<pre>[Unit]
+Description=loomy2api gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=loomy
+WorkingDirectory=/opt/loomy2api
+ExecStart=/opt/loomy2api/loomy2api serve
+Restart=always
+RestartSec=5
+UMask=0077                     # accounts.json 里是明文密码
+Environment=LOOMY_HOST=127.0.0.1
+
+[Install]
+WantedBy=multi-user.target</pre>
+<pre>sudo systemctl daemon-reload
+sudo systemctl enable --now loomy2api
+journalctl -u loomy2api -f          # 跟日志</pre>
+<p>保存为 <span class="d-code">/etc/systemd/system/loomy2api.service</span>；<span class="d-code">ExecStart</span> 指向二进制本体，不需要解释器，也不需要 <span class="d-code">Environment=PATH</span> 之类的东西。</p>
+
+<h3 id="d-deploy-windows">Windows</h3>
+<p>计划任务（系统自带，不加软件）：写一个 <span class="d-code">start.cmd</span>：</p>
+<pre>@echo off
+cd /d D:\loomy2api
+loomy2api.exe serve &gt;&gt; logs\console.log 2&gt;&amp;1</pre>
+<pre>schtasks /create /tn loomy2api /sc onstart /rl highest /tr "D:\loomy2api\start.cmd" /f
+schtasks /run /tn loomy2api</pre>
+<p>或者用 NSSM 装成真正的 Windows 服务（可自动重启、可看退出码）：</p>
+<pre>nssm install loomy2api "D:\loomy2api\loomy2api.exe" "serve"
+nssm set loomy2api AppDirectory D:\loomy2api
+nssm set loomy2api AppStdout D:\loomy2api\logs\service.log
+nssm start loomy2api</pre>
+
+<h3 id="d-deploy-docker">Docker / Compose</h3>
+<pre>docker build -t loomy2api .
+docker run -d --name loomy2api -p 17890:17890 -v "$PWD/data:/data" loomy2api</pre>
+<p>镜像多阶段构建：<span class="d-code">golang:1.27</span> 编译出静态二进制，<span class="d-code">alpine:3.21</span> 只带二进制、CA 证书与时区。容器内固定 <span class="d-code">LOOMY_HOST=0.0.0.0</span>、<span class="d-code">LOOMY_ACCOUNTS_FILE=/data/accounts.json</span>、<span class="d-code">LOOMY_LOG_DIR=/data/logs</span>，所以只要把 <span class="d-code">config.json</span>、<span class="d-code">accounts.json</span> 放进挂载到 <span class="d-code">/data</span> 的目录即可。Compose 版本：</p>
+<pre>services:
+  loomy2api:
+    build: .
+    container_name: loomy2api
+    restart: unless-stopped
+    ports: ["17890:17890"]
+    volumes: ["./data:/data"]</pre>
+<pre>mkdir -p data &amp;&amp; cp accounts.example.json data/accounts.json   # 然后编辑它
+docker compose up -d --build
+docker compose logs -f</pre>
+
+<h3 id="d-expose">对外开放（可选，先读这段）</h3>
+<p>默认只绑 <span class="d-code">127.0.0.1</span>，只有本机能访问。要共享给局域网或公网：</p>
+<ul>
+<li>先<strong>设好 api_keys</strong> —— 没有鉴权时，谁能连上端口谁就能花你账号的积分。</li>
+<li>再把 <span class="d-code">host</span> 改成 <span class="d-code">0.0.0.0</span>（或设环境变量 <span class="d-code">LOOMY_HOST=0.0.0.0</span>）。</li>
+<li>公网就再加一层带 TLS 的反向代理，例如 Caddy：</li>
+</ul>
+<pre>api.example.com {
+    reverse_proxy 127.0.0.1:17890
+}</pre>
+<p>客户端这时用 <span class="d-code">https://api.example.com/v1</span> 作为 base URL。更稳妥的做法是用 VPN / Tailscale / WireGuard 打通，而不是直接暴露公网 —— 网关自身没有限流。</p>
+
+<h2 id="d-clients">客户端指向表</h2>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>客户端</th><th>设置</th></tr></thead>
+<tbody>
+<tr><td>OpenAI SDK / LangChain</td><td><span class="d-code">base_url="http://127.0.0.1:17890/v1"</span>，api_key 随便填（或你设的密钥）</td></tr>
+<tr><td>Cherry Studio / LobeChat / NextChat / Open WebUI</td><td>提供商选「OpenAI 兼容」，Base URL 填上面的地址，模型 id 用 <span class="d-code">/v1/models</span> 里的</td></tr>
+<tr><td>沉浸式翻译 / 双语阅读</td><td>自定义 OpenAI 接口，同一 base URL</td></tr>
+<tr><td>Cline / Continue / Roo Code</td><td>OpenAI Compatible，或 Anthropic 模式填裸 host</td></tr>
+<tr><td>Claude Code</td><td><span class="d-code">ANTHROPIC_BASE_URL=http://127.0.0.1:17890</span>，<span class="d-code">ANTHROPIC_API_KEY=&lt;任意&gt;</span></td></tr>
+<tr><td>Caddy / Nginx 后的公网地址</td><td>把 host 换成你的域名，<span class="d-code">/v1</span> 规则不变（Anthropic 仍是裸 host）</td></tr>
+<tr><td>curl / 脚本</td><td>见上面「API 用法」两段示例</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="d-upgrade">升级与备份</h2>
+<p>单二进制的升级就是换文件 + 重启：</p>
+<pre># 源码方式
+git pull &amp;&amp; go build -o loomy2api ./cmd/loomy2api &amp;&amp; sudo systemctl restart loomy2api
+
+# Release 方式
+# 下载新平台的二进制覆盖旧文件，再重启服务
+
+# systemd
+sudo systemctl restart loomy2api
+# Docker
+docker compose up -d --build</pre>
+<p>Windows 计划任务要把任务先结束再启动（<span class="d-code">schtasks /end /tn loomy2api</span> → 换文件 → <span class="d-code">schtasks /run /tn loomy2api</span>），否则可执行文件被占用无法覆盖。NSSM 用 <span class="d-code">nssm restart loomy2api</span>。</p>
+<p>需要备份的就两个文件：</p>
+<ul>
+<li><strong>accounts.json</strong> —— 账号、session、（如果填了）明文密码，以及每个账号绑定的设备标识。丢了要重新登录并重新绑定。</li>
+<li><strong>config.json</strong> —— 你的设置。</li>
+</ul>
+<p>两者都在 <span class="d-code">.gitignore</span> 里。<span class="d-code">logs/</span> 是纯输出，可以随时删。没有数据库，没有 migration。</p>
+
+<h2 id="d-troubleshoot">故障排查</h2>
+<div class="d-table-wrap">
+<table class="d-table">
+<thead><tr><th>症状</th><th>原因 / 处理</th></tr></thead>
+<tbody>
+<tr><td>账号池里没有可用账号</td><td><span class="d-code">accounts.json</span> 为空、账号全被禁用，或全在冷却中；看一眼面板总览的账态列。</td></tr>
+<tr><td>… session 不可用且没有账号密码</td><td>这个账号只存了 session 且已过期。补 <span class="d-code">loginid</span> + <span class="d-code">password</span>，或走 <span class="d-code">sms</span> + <span class="d-code">verify</span> 重新换 session。</td></tr>
+<tr><td>getPuKey … HMAC signature does not match</td><td><span class="d-code">access_key_secret</span> 写错或被截断；留空用内置常量即可。</td></tr>
+<tr><td>请求一直卡到超时</td><td>链路把 <span class="d-code">traceparent</span> 头剥掉了；检查中间的代理 / 反代是否过滤了自定义头。</td></tr>
+<tr><td>402 / 积分耗尽</td><td>该账号没额度了：充值，或往池子里再加一个账号让它自动顶上。</td></tr>
+<tr><td>启动就报端口占用（Windows）</td><td>Windows 允许多个进程重复绑定同一端口，旧进程可能还活着：<span class="d-code">netstat -ano | findstr 17890</span> 找到 PID 再结束掉。</td></tr>
+<tr><td>面板一直弹密钥框 / 接口 401</td><td>config.json 里设了 <span class="d-code">api_keys</span>，但页面里存的是旧密钥；点「登出」重输，或确认服务端密钥与输入一致。</td></tr>
+<tr><td>找不到 config.json / 配置没生效</td><td>默认读工作目录的 <span class="d-code">./config.json</span>；用 <span class="d-code">-c</span> 指了别的路径时，相对路径配置项都相对那个目录。环境变量优先级最高。</td></tr>
+<tr><td>Claude Code 报 404</td><td><span class="d-code">ANTHROPIC_BASE_URL</span> 多写了 <span class="d-code">/v1</span>：Anthropic 方言要填裸 host。</td></tr>
+<tr><td>模型答非所问 / 回的不是指定的 id</td><td>上游对未知 id 静默回落到默认模型，看响应里的 <span class="d-code">model</span> 字段，换成 <span class="d-code">/v1/models</span> 里真实存在的 id。</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="d-checks">日常自检</h3>
+<pre>curl -s http://127.0.0.1:17890/health         # 状态 + 可用账号数 + 面板地址
+./loomy2api accounts                           # 各账号余额与 session 剩余天数
+tail -f logs/gateway.log                       # 每次调用的模型 / token / 扣分</pre>
+
+<h2 id="d-more">更多</h2>
+<p>构建与测试：<span class="d-code">go build ./... </span>、<span class="d-code">go vet ./...</span>、<span class="d-code">go test ./... -count=1</span>。测试全部跑在本地假上游上，不访问真实账号服务、不花积分。命令行完整用法见 <span class="d-code">./loomy2api --help</span>，配置模板见 <span class="d-code">config.example.json</span>。</p>
+<p class="d-foot">协议细节（登录、签名串、SSE、额度账本、客户端配置加密）见上游项目 docs/PROTOCOL.md（Python 版仓库）。本页是离线精简版，随二进制一起发布。</p>
+</div>

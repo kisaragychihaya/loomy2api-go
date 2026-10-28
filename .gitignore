@@ -1,0 +1,26 @@
+# ---- 运行期状态 / 秘密（永不提交）----
+config.json
+accounts.json
+session.json
+credentials.json
+api-key.txt
+logs/
+data/
+*.log
+*.tmp
+
+# ---- 构建产物 ----
+/loomy2api
+/loomy2api.exe
+/out/
+dist/
+build/
+
+# ---- 编译/测试缓存与编辑器 ----
+*.test
+*.out
+.svrverify/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
