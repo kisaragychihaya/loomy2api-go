@@ -738,6 +738,12 @@ func (h *apiHandler) panelAPI(w *svrResponse, r *http.Request, path string) erro
 		result, herr = panel.RenewAccount(payload)
 	case "/api/panel/accounts/identity":
 		result, herr = panel.Identity(payload)
+	case "/api/panel/sms/send":
+		result, herr = panel.SendSMS(payload)
+	case "/api/panel/sms/verify":
+		result, herr = panel.VerifySMS(payload)
+	case "/api/panel/onboarding":
+		result, herr = panel.Onboarding(payload)
 	case "/api/panel/refresh":
 		result, herr = panel.Refresh(payload)
 	default:

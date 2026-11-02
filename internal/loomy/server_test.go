@@ -1154,3 +1154,86 @@ func TestConfigHotReloadWatcher(t *testing.T) {
 	_, snap := h.getJSON("/v1/admin/accounts", nil)
 	t.Fatalf("3s 内 strategy 没有变成 round_robin：%v", jstr(snap, "strategy"))
 }
+
+// ------------------------------------------- 短信登录与新手任务路由（PR #2 移植）
+
+// svrTestInjectFakeClient 把池里的账号客户端换成替身（server 夹具默认是真实客户端，
+// 指向死端口；短信两步都要过 AccountClient，不过替身就到不了 Panel 层）。
+func svrTestInjectFakeClient(h *svrTestHarness) *FakeAccountClient {
+	h.t.Helper()
+	client := &FakeAccountClient{}
+	h.gw.Pool().Client = client
+	return client
+}
+
+// TestPanelSMSEndpoints：POST /api/panel/sms/send + /sms/verify 全链路走通，
+// verify 新建账号并带回 state。
+func TestPanelSMSEndpoints(t *testing.T) {
+	h := svrTestNewHarness(t)
+	svrTestInjectFakeClient(h)
+
+	status, body, _ := h.post("/api/panel/sms/send",
+		map[string]any{"loginid": "13900000001"}, nil)
+	if status != 200 {
+		t.Fatalf("sms/send status = %d, want 200 (%s)", status, body)
+	}
+	payload := svrTestDecode(t, "/api/panel/sms/send", body)
+	if got := jstr(payload, "msgid"); got != "msgid-test" {
+		t.Fatalf("msgid = %q, want msgid-test", got)
+	}
+
+	status, body, _ = h.post("/api/panel/sms/verify", map[string]any{
+		"name": "sms1", "loginid": "13900000001", "code": "123456", "msgid": "msgid-test",
+	}, nil)
+	if status != 200 {
+		t.Fatalf("sms/verify status = %d, want 200 (%s)", status, body)
+	}
+	payload = svrTestDecode(t, "/api/panel/sms/verify", body)
+	if !jbool(payload, "ok") || !jbool(payload, "created") {
+		t.Fatalf("sms/verify 响应 = %v", payload)
+	}
+	if h.gw.Pool().Get("sms1") == nil {
+		t.Fatal("账号 sms1 不在池里")
+	}
+}
+
+// TestPanelSMSSendRequiresPhone：缺手机号回 400（PoolError → POST 400）。
+func TestPanelSMSSendRequiresPhone(t *testing.T) {
+	h := svrTestNewHarness(t)
+	svrTestInjectFakeClient(h)
+
+	status, body, _ := h.post("/api/panel/sms/send", map[string]any{}, nil)
+	if status != 400 {
+		t.Fatalf("status = %d, want 400 (%s)", status, body)
+	}
+}
+
+// TestPanelOnboardingEndpoint：POST /api/panel/onboarding 领取成功，响应带积分与 state。
+func TestPanelOnboardingEndpoint(t *testing.T) {
+	h := svrTestNewHarness(t)
+
+	status, body, _ := h.post("/api/panel/onboarding", map[string]any{"name": "a"}, nil)
+	if status != 200 {
+		t.Fatalf("onboarding status = %d, want 200 (%s)", status, body)
+	}
+	payload := svrTestDecode(t, "/api/panel/onboarding", body)
+	if !jbool(payload, "ok") {
+		t.Fatalf("ok = false: %v", payload)
+	}
+	if got := jint(payload, "claimed_points"); got != OnboardingTotal {
+		t.Fatalf("claimed_points = %d, want %d", got, OnboardingTotal)
+	}
+	if _, has := payload["state"]; !has {
+		t.Fatal("响应应带 state")
+	}
+}
+
+// TestPanelOnboardingEndpointUnknownAccount：未知账号回 400。
+func TestPanelOnboardingEndpointUnknownAccount(t *testing.T) {
+	h := svrTestNewHarness(t)
+
+	status, body, _ := h.post("/api/panel/onboarding", map[string]any{"name": "ghost"}, nil)
+	if status != 400 {
+		t.Fatalf("status = %d, want 400 (%s)", status, body)
+	}
+}

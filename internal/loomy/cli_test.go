@@ -499,3 +499,82 @@ func cfgAccountsFile(t *testing.T, env *cliTestEnv) string {
 	}
 	return cfg.AccountsFile
 }
+
+// ------------------------------------------------- onboarding（PR #2 移植）
+
+// TestCLIOnboardingClaimsTasks：跑通「领取 8 个新手任务」，输出合计 10000 分。
+func TestCLIOnboardingClaimsTasks(t *testing.T) {
+	env := cliTestSetup(t)
+	fake := &FakeUpstream{}
+	defer fake.Stop()
+	env.setUpstream(t, fake.Start())
+
+	code, out := env.run("onboarding", "a")
+	if code != 0 {
+		t.Fatalf("onboarding = %d, want 0（输出：%s）", code, out)
+	}
+	if !strings.Contains(out, "—— a ——") {
+		t.Fatalf("输出缺少账号头：%s", out)
+	}
+	if !strings.Contains(out, "发送你的第一条消息 +500") {
+		t.Fatalf("输出缺少任务明细：%s", out)
+	}
+	if !strings.Contains(out, "把搭子分享给朋友 +2000") {
+		t.Fatalf("输出缺少最后一项：%s", out)
+	}
+	if !strings.Contains(out, "合计本次领取 10000 积分（满分 10000）") {
+		t.Fatalf("输出缺少合计：%s", out)
+	}
+}
+
+// TestCLIOnboardingSkipsCompleted：已完成任务标注跳过，领取数是差额。
+func TestCLIOnboardingSkipsCompleted(t *testing.T) {
+	env := cliTestSetup(t)
+	fake := &FakeUpstream{OnboardingTasks: map[string]bool{
+		"first_message": true,
+		"share_soul":    true,
+	}}
+	defer fake.Stop()
+	env.setUpstream(t, fake.Start())
+
+	code, out := env.run("onboarding", "a")
+	if code != 0 {
+		t.Fatalf("onboarding = %d, want 0（输出：%s）", code, out)
+	}
+	if !strings.Contains(out, "已完成跳过 2 项") {
+		t.Fatalf("输出缺少跳过明细：%s", out)
+	}
+	if !strings.Contains(out, "合计本次领取 7500 积分") {
+		t.Fatalf("输出缺少差额合计：%s", out)
+	}
+}
+
+// TestCLIOnboardingUnknownAccount：未知账号计入失败，退出码 1。
+func TestCLIOnboardingUnknownAccount(t *testing.T) {
+	env := cliTestSetup(t)
+
+	code, out := env.run("onboarding", "ghost")
+	if code != 1 {
+		t.Fatalf("onboarding = %d, want 1（输出：%s）", code, out)
+	}
+	if !strings.Contains(out, "✗ 没有名为 ghost 的账号") {
+		t.Fatalf("输出缺少失败明细：%s", out)
+	}
+	if !strings.Contains(out, "1 个账号失败") {
+		t.Fatalf("输出缺少失败合计：%s", out)
+	}
+}
+
+// TestCLIOnboardingEmptyPool：空账号池提示先加账号，退出码 1。
+func TestCLIOnboardingEmptyPool(t *testing.T) {
+	env := cliTestSetup(t)
+	writeAccounts(t, cfgAccountsFile(t, env), nil)
+
+	code, out := env.run("onboarding")
+	if code != 1 {
+		t.Fatalf("onboarding = %d, want 1（输出：%s）", code, out)
+	}
+	if !strings.Contains(out, "账号池为空") {
+		t.Fatalf("输出缺少空池提示：%s", out)
+	}
+}

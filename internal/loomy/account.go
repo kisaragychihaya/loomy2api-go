@@ -398,11 +398,14 @@ func pyInt64(v any) int64 {
 // ---------------------------------------------------------- AccountClientAPI
 
 // AccountClientAPI 是账号池对 AccountClient 的最小依赖（pool 里 Client 字段的类型）。
+// SendSMSCode / LoginBySMS 对应 Python 面板短信登录两步（见 panel.go 的 SendSMS / VerifySMS）。
 type AccountClientAPI interface {
 	IdentityMode() string
 	EnsureIdentity(acc *Account) map[string]any
 	RebindIdentity(acc *Account) map[string]any
 	Fill(acc *Account) error
+	SendSMSCode(phone string, identity map[string]any) (map[string]any, error)
+	LoginBySMS(phone, code, msgid string, identity map[string]any) (map[string]string, error)
 }
 
 // ------------------------------------------------------------ AccountClient

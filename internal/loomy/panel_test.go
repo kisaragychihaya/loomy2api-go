@@ -661,3 +661,316 @@ func TestPanelMethodQuotaStaleDefaultsToThirtyMinutes(t *testing.T) {
 		t.Fatalf("31 分钟前的额度缓存应刷新，points 调用次数 %d → %d", before, got)
 	}
 }
+
+// ------------------------------------------------- 短信登录（PR #2 移植）
+
+// TestPanelSendSMS：第一步发码成功时把 msgid 交回页面。
+func TestPanelSendSMS(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.SendSMS(map[string]any{"loginid": "13800000001"})
+	if err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	if !jbool(result, "ok") {
+		t.Fatalf("ok = false: %v", result)
+	}
+	if got := jstr(result, "msgid"); got != "msgid-test" {
+		t.Fatalf("msgid = %q, want msgid-test", got)
+	}
+	if got := jstr(result, "phone"); got != "13800000001" {
+		t.Fatalf("phone = %q, want 13800000001", got)
+	}
+}
+
+// TestPanelSendSMSAcceptsPhoneAlias：payload 用 phone 键（而非 loginid）同样认。
+func TestPanelSendSMSAcceptsPhoneAlias(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.SendSMS(map[string]any{"phone": "13800000001"})
+	if err != nil {
+		t.Fatalf("SendSMS: %v", err)
+	}
+	if got := jstr(result, "msgid"); got != "msgid-test" {
+		t.Fatalf("msgid = %q, want msgid-test", got)
+	}
+}
+
+// TestPanelSendSMSRequiresPhone：缺手机号直接报错，不发请求。
+func TestPanelSendSMSRequiresPhone(t *testing.T) {
+	h := pnlTestNew(t)
+
+	if _, err := h.panel.SendSMS(map[string]any{}); err == nil {
+		t.Fatal("空手机号应报错")
+	} else if perr, isPool := err.(*PoolError); !isPool || !strings.Contains(perr.Msg, "手机号") {
+		t.Fatalf("err = %v, want 含「手机号」的 *PoolError", err)
+	}
+}
+
+// TestPanelSendSMSSurfacesClientError：账号服务报错包装成 PoolError。
+func TestPanelSendSMSSurfacesClientError(t *testing.T) {
+	h := pnlTestNew(t)
+	h.client.SMSErr = &AccountError{Msg: "risk control triggered"}
+
+	_, err := h.panel.SendSMS(map[string]any{"loginid": "13800000001"})
+	if err == nil || !strings.Contains(err.Error(), "验证码发送失败") {
+		t.Fatalf("err = %v, want 含「验证码发送失败」", err)
+	}
+}
+
+// TestPanelSendSMSRejectsMissingMsgid：响应缺 msgid 时不把空值交回页面。
+func TestPanelSendSMSRejectsMissingMsgid(t *testing.T) {
+	h := pnlTestNew(t)
+	h.client.SMSNoMsgid = true
+
+	_, err := h.panel.SendSMS(map[string]any{"loginid": "13800000001"})
+	if err == nil || !strings.Contains(err.Error(), "msgid") {
+		t.Fatalf("err = %v, want 含「msgid」", err)
+	}
+}
+
+// TestPanelVerifySMSCreatesAccount：第二步用码换 session，新名字建账号并落盘。
+func TestPanelVerifySMSCreatesAccount(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.VerifySMS(map[string]any{
+		"name": "sms1", "loginid": "13900000001", "code": "123456", "msgid": "msgid-test",
+	})
+	if err != nil {
+		t.Fatalf("VerifySMS: %v", err)
+	}
+	if !jbool(result, "created") {
+		t.Fatalf("created = false: %v", result)
+	}
+	acc := h.pool.Get("sms1")
+	if acc == nil {
+		t.Fatal("账号 sms1 不在池里")
+	}
+	if acc.Session != "sms-session" || acc.Loginid != "13900000001" {
+		t.Fatalf("session/loginid = %q/%q, want sms-session/13900000001", acc.Session, acc.Loginid)
+	}
+	if !acc.SessionValid() {
+		t.Fatal("新 session 应有效")
+	}
+	if result["days_left"] == nil {
+		t.Fatal("days_left 应为数字")
+	}
+	if !jbool(result, "ok") || jmap(result, "state") == nil {
+		t.Fatalf("响应应带 ok 与 state: %v", result)
+	}
+}
+
+// TestPanelVerifySMSDefaultsNameToMain：账号名缺省用 main。
+func TestPanelVerifySMSDefaultsNameToMain(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.VerifySMS(map[string]any{
+		"loginid": "13900000001", "code": "123456", "msgid": "msgid-test",
+	})
+	if err != nil {
+		t.Fatalf("VerifySMS: %v", err)
+	}
+	if got := jstr(result, "name"); got != "main" {
+		t.Fatalf("name = %q, want main", got)
+	}
+	if h.pool.Get("main") == nil {
+		t.Fatal("账号 main 不在池里")
+	}
+}
+
+// TestPanelVerifySMSRenewsExistingAccount：同名账号不重复添加，而是换掉旧 session。
+func TestPanelVerifySMSRenewsExistingAccount(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.VerifySMS(map[string]any{
+		"name": "a", "loginid": "13800000001", "code": "123456", "msgid": "msgid-test",
+	})
+	if err != nil {
+		t.Fatalf("VerifySMS: %v", err)
+	}
+	if jbool(result, "created") {
+		t.Fatalf("created = true, want false（续期已有账号）: %v", result)
+	}
+	acc := h.pool.Get("a")
+	if acc.Session != "sms-session" {
+		t.Fatalf("session = %q, want sms-session", acc.Session)
+	}
+	if acc.Userid != "uid-sms" {
+		t.Fatalf("userid = %q, want uid-sms", acc.Userid)
+	}
+}
+
+// TestPanelVerifySMSRequiresFields：手机号 / 验证码 / msgid 缺一不可。
+func TestPanelVerifySMSRequiresFields(t *testing.T) {
+	h := pnlTestNew(t)
+
+	cases := []map[string]any{
+		{"code": "123456", "msgid": "m"},             // 缺 phone
+		{"loginid": "13800000001", "msgid": "m"},     // 缺 code
+		{"loginid": "13800000001", "code": "123456"}, // 缺 msgid
+	}
+	for _, payload := range cases {
+		if _, err := h.panel.VerifySMS(payload); err == nil {
+			t.Fatalf("payload %v 应报错", payload)
+		}
+	}
+}
+
+// TestPanelVerifySMSSurfacesLoginError：验证码错 / 过期时把账号服务的错误带出来。
+func TestPanelVerifySMSSurfacesLoginError(t *testing.T) {
+	h := pnlTestNew(t)
+	h.client.SMSErr = &AccountError{Msg: "invalid code"}
+
+	_, err := h.panel.VerifySMS(map[string]any{
+		"loginid": "13800000001", "code": "000000", "msgid": "msgid-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "短信登录失败") {
+		t.Fatalf("err = %v, want 含「短信登录失败」", err)
+	}
+}
+
+// ------------------------------------------------- 新手任务（PR #2 移植）
+
+// TestPanelOnboardingSingleAccount：给指定账号领 8 个新手任务，响应带结果与状态。
+func TestPanelOnboardingSingleAccount(t *testing.T) {
+	h := pnlTestNew(t)
+
+	result, err := h.panel.Onboarding(map[string]any{"name": "a"})
+	if err != nil {
+		t.Fatalf("Onboarding: %v", err)
+	}
+	if !jbool(result, "ok") {
+		t.Fatalf("ok = false: %v", result)
+	}
+	if got := jint(result, "claimed_points"); got != OnboardingTotal {
+		t.Fatalf("claimed_points = %d, want %d", got, OnboardingTotal)
+	}
+	results := pnlTestList(t, result, "results")
+	if len(results) != 1 {
+		t.Fatalf("results = %d 条, want 1", len(results))
+	}
+	entry, isMap := results[0].(map[string]any)
+	if !isMap {
+		t.Fatalf("results[0] 不是对象: %v", results[0])
+	}
+	if !jbool(entry, "ok") || jstr(entry, "name") != "a" {
+		t.Fatalf("results[0] = %v", entry)
+	}
+	if jmap(result, "state") == nil {
+		t.Fatal("响应应带 state")
+	}
+	// 领取后顺手刷新了额度（假上游 balance=100）。
+	if acc := h.pool.Get("a"); acc.Balance == nil || *acc.Balance != 100 {
+		t.Fatalf("Balance = %v, want 100", acc.Balance)
+	}
+}
+
+// TestPanelOnboardingUnknownAccount：点名不存在的账号报错。
+func TestPanelOnboardingUnknownAccount(t *testing.T) {
+	h := pnlTestNew(t)
+
+	if _, err := h.panel.Onboarding(map[string]any{"name": "ghost"}); err == nil {
+		t.Fatal("未知账号应报错")
+	} else if perr, isPool := err.(*PoolError); !isPool || !strings.Contains(perr.Msg, "ghost") {
+		t.Fatalf("err = %v, want 含 ghost 的 *PoolError", err)
+	}
+}
+
+// TestPanelOnboardingAllAccounts：不点名时遍历全池。假上游只有一份全局任务状态：
+// a 领完后 b 看到的 8 个任务全部已完成（跳过不发请求），合计只算 a 的 10000。
+func TestPanelOnboardingAllAccounts(t *testing.T) {
+	h := pnlTestNew(t)
+	// 再加一个 session 有效的账号 b。
+	writeAccounts(t, filepath.Join(h.dir, "accounts.json"), []map[string]any{
+		{"name": "a", "loginid": "13800000001", "password": "pw", "session": "s1", "userid": "u1",
+			"expireAt": time.Now().Unix() + 14*86400},
+		{"name": "b", "loginid": "13900000002", "session": "s2", "userid": "u2",
+			"expireAt": time.Now().Unix() + 14*86400},
+	})
+	if err := h.pool.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	result, err := h.panel.Onboarding(map[string]any{})
+	if err != nil {
+		t.Fatalf("Onboarding: %v", err)
+	}
+	results := pnlTestList(t, result, "results")
+	if len(results) != 2 {
+		t.Fatalf("results = %d 条, want 2", len(results))
+	}
+	for _, item := range results {
+		entry, isMap := item.(map[string]any)
+		if !isMap || !jbool(entry, "ok") {
+			t.Fatalf("每个账号都应领取成功: %v", item)
+		}
+	}
+	if got := jint(result, "claimed_points"); got != OnboardingTotal {
+		t.Fatalf("claimed_points = %d, want %d（b 全部跳过）", got, OnboardingTotal)
+	}
+	second, isMap := results[1].(map[string]any)
+	if !isMap {
+		t.Fatalf("results[1] 不是对象: %v", results[1])
+	}
+	if got := len(second["skipped"].([]string)); got != len(OnboardingTasks) {
+		t.Fatalf("b 应跳过全部 %d 个任务, got %d", len(OnboardingTasks), got)
+	}
+}
+
+// TestPanelOnboardingCompleteAuthAborts：complete 回 100002 时该账号批内中断 ——
+// 与 Python 一致，已发出的失败记在 failed 里、单账号仍 ok=true（领取动作本身跑完了），
+// 面板返回整体 ok=true，state 照常带回。
+func TestPanelOnboardingCompleteAuthAborts(t *testing.T) {
+	h := pnlTestNew(t)
+	h.upstream.OnboardingCompleteCode = OnboardingAuthErrorCode
+
+	result, err := h.panel.Onboarding(map[string]any{"name": "a"})
+	if err != nil {
+		t.Fatalf("Onboarding: %v", err)
+	}
+	if !jbool(result, "ok") {
+		t.Fatalf("ok = false, want true（与 Python 语义一致）: %v", result)
+	}
+	results := pnlTestList(t, result, "results")
+	entry, isMap := results[0].(map[string]any)
+	if !isMap || !jbool(entry, "ok") {
+		t.Fatalf("results[0] = %v", results[0])
+	}
+	failed, isList := entry["failed"].([]map[string]any)
+	if !isList || len(failed) != 1 {
+		t.Fatalf("failed = %v, want 1 条", entry["failed"])
+	}
+	if got := jstr(failed[0], "code"); got != OnboardingAuthErrorCode {
+		t.Fatalf("code = %q, want %q", got, OnboardingAuthErrorCode)
+	}
+	// 批内中断：只发了 1 个 complete 请求。
+	if got := len(obTestCalls(h.upstream, "/onboarding/tasks/complete")); got != 1 {
+		t.Fatalf("complete 请求数 = %d, want 1", got)
+	}
+	if jmap(result, "state") == nil {
+		t.Fatal("响应应带 state")
+	}
+}
+
+// TestPanelOnboardingFetchAuthFails：查询阶段就 100002 时，单账号 ok=false，
+// 面板整体 ok=false（对应 Python claim_all 抛错被 claim_for_account 兜住的路径）。
+func TestPanelOnboardingFetchAuthFails(t *testing.T) {
+	h := pnlTestNew(t)
+	h.upstream.OnboardingTasksCode = OnboardingAuthErrorCode
+
+	result, err := h.panel.Onboarding(map[string]any{"name": "a"})
+	if err != nil {
+		t.Fatalf("Onboarding: %v", err)
+	}
+	if jbool(result, "ok") {
+		t.Fatalf("ok = true, want false: %v", result)
+	}
+	results := pnlTestList(t, result, "results")
+	entry, isMap := results[0].(map[string]any)
+	if !isMap || jbool(entry, "ok") {
+		t.Fatalf("results[0] 应领取失败: %v", results[0])
+	}
+	if got := jstr(entry, "code"); got != OnboardingAuthErrorCode {
+		t.Fatalf("code = %q, want %q", got, OnboardingAuthErrorCode)
+	}
+}

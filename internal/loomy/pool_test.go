@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,9 +47,20 @@ func (c *poolFakeClient) Fill(acc *Account) error {
 	return nil
 }
 
+// SendSMSCode / LoginBySMS 只在这个 fake 覆盖的 AccountClientAPI 里出现
+// （短信路径不是 pool 测试的关注点，给最小实现即可）。
+func (c *poolFakeClient) SendSMSCode(phone string, identity map[string]any) (map[string]any, error) {
+	return map[string]any{"code": "000000", "data": map[string]any{"msgid": "msgid-test"}}, nil
+}
+
+func (c *poolFakeClient) LoginBySMS(phone, code, msgid string, identity map[string]any) (map[string]string, error) {
+	return map[string]string{"session": "sms-session", "userid": "uid-sms", "phone": phone}, nil
+}
+
 // poolFakeGateway 用一个函数实现 GatewayAPI（对应两个 tick 用例里的 FakeGateway）。
 type poolFakeGateway struct {
 	quota func(session string) (Quota, error)
+	call  func(session, suffix string, payload map[string]any, extra map[string]string, method string) (int, http.Header, []byte, error)
 }
 
 var _ GatewayAPI = (*poolFakeGateway)(nil)
@@ -58,6 +70,13 @@ func (g *poolFakeGateway) Quota(session string) (Quota, error) {
 		return Quota{}, nil
 	}
 	return g.quota(session)
+}
+
+func (g *poolFakeGateway) Call(session, suffix string, payload map[string]any, extra map[string]string, method string) (int, http.Header, []byte, error) {
+	if g.call == nil {
+		return 404, nil, []byte(`{"error":{"message":"not found"}}`), nil
+	}
+	return g.call(session, suffix, payload, extra, method)
 }
 
 // poolInt 造一个 *int64（Account 的额度字段用指针区分「未知」与「零」）。

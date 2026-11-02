@@ -41,6 +41,19 @@ type FakeUpstream struct {
 	ModelsPayload map[string]any
 	Quota         map[string]any
 
+	// OnboardingTasks 记录新手任务的完成状态（onboarding 端点用）；nil 表示全部未完成。
+	// 与 Quota 一样：测试在请求开始前写入、请求结束后读取，不加锁。
+	OnboardingTasks map[string]bool
+	// OnboardingCompleteCode 非空时，/onboarding/tasks/complete 固定回这个业务码
+	// （HTTP 仍是 200，模拟 100002 session 失效等失败路径）。
+	OnboardingCompleteCode string
+	// OnboardingReplay 为 true 时，complete 对每个 key 都回 alreadyCompleted: true
+	// （服务端已置位、客户端状态表还没跟上的重放场景）。
+	OnboardingReplay bool
+	// OnboardingTasksCode 非空时，GET /onboarding/tasks 固定回这个业务码
+	// （模拟查询阶段就 auth 失败的路径）。
+	OnboardingTasksCode string
+
 	mu     sync.Mutex
 	server *httptest.Server
 	url    string
@@ -168,6 +181,22 @@ func (f *FakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 				data[k] = v
 			}
 			f.sendJSON(w, map[string]any{"code": "000000", "desc": "成功", "data": data}, http.StatusOK)
+		case strings.HasSuffix(path, "/onboarding/tasks"):
+			tasks := map[string]any{}
+			for _, task := range OnboardingTasks {
+				tasks[task.Key] = f.OnboardingTasks[task.Key]
+			}
+			code := f.OnboardingTasksCode
+			if code == "" {
+				code = OnboardingOKCode
+			}
+			if code != OnboardingOKCode {
+				f.sendJSON(w, map[string]any{"code": code, "desc": "失败"}, http.StatusOK)
+				return
+			}
+			f.sendJSON(w, map[string]any{"code": OnboardingOKCode, "desc": "成功", "data": map[string]any{
+				"tasks": tasks, "earned": 0, "total": OnboardingTotal,
+			}}, http.StatusOK)
 		default:
 			f.reject(w, http.StatusNotFound, "not found")
 		}
@@ -233,6 +262,24 @@ func (f *FakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		f.sendJSON(w, map[string]any{"data": []any{map[string]any{"url": "http://x/img.png"}}}, http.StatusOK)
 	case strings.HasSuffix(path, "/embeddings"):
 		f.sendJSON(w, map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []any{0.1}}}}, http.StatusOK)
+	case strings.HasSuffix(path, "/onboarding/tasks/complete"):
+		key := anthStr(body["key"])
+		code := f.OnboardingCompleteCode
+		if code == "" {
+			code = OnboardingOKCode
+		}
+		if code != OnboardingOKCode {
+			// 业务失败（如 100002）：不置位任务。
+			f.sendJSON(w, map[string]any{"code": code, "desc": "失败"}, http.StatusOK)
+			return
+		}
+		already := f.OnboardingTasks[key] || f.OnboardingReplay
+		if f.OnboardingTasks == nil {
+			f.OnboardingTasks = map[string]bool{}
+		}
+		f.OnboardingTasks[key] = true
+		f.sendJSON(w, map[string]any{"code": OnboardingOKCode, "desc": "成功",
+			"data": map[string]any{"alreadyCompleted": already, "balance": OnboardingTotal}}, http.StatusOK)
 	default:
 		f.reject(w, http.StatusNotFound, "not found")
 	}
@@ -300,6 +347,11 @@ type FakeAccountClient struct {
 	Rebinds       []string
 	Counter       int
 	SessionPrefix string // 默认 "testsession"
+
+	// SMSErr 非 nil 时 SendSMSCode / LoginBySMS 直接返回它（面板短信登录的错误路径用）。
+	SMSErr error
+	// SMSNoMsgid 为 true 时 SendSMSCode 返回缺少 msgid 的响应。
+	SMSNoMsgid bool
 }
 
 var _ AccountClientAPI = (*FakeAccountClient)(nil)
@@ -341,11 +393,20 @@ func (f *FakeAccountClient) Fill(acc *Account) error {
 
 // SendSMSCode 对应 Python send_sms_code（CLI 的短信登录路径用）。
 func (f *FakeAccountClient) SendSMSCode(phone string, identity map[string]any) (map[string]any, error) {
+	if f.SMSErr != nil {
+		return nil, f.SMSErr
+	}
+	if f.SMSNoMsgid {
+		return map[string]any{"code": "000000", "data": map[string]any{}}, nil
+	}
 	return map[string]any{"code": "000000", "data": map[string]any{"msgid": "msgid-test"}}, nil
 }
 
 // LoginBySMS 对应 Python login_by_sms。
 func (f *FakeAccountClient) LoginBySMS(phone, code, msgid string, identity map[string]any) (map[string]string, error) {
+	if f.SMSErr != nil {
+		return nil, f.SMSErr
+	}
 	return map[string]string{"session": "sms-session", "userid": "uid-sms", "phone": phone}, nil
 }
 

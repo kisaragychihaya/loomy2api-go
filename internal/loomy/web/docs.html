@@ -32,6 +32,7 @@ certutil -hashfile loomy2api.exe SHA256   # Windows</pre>
 <tr><td><span class="d-code">add</span> / <span class="d-code">remove</span></td><td>加账号 / 删账号（<span class="d-code">remove</span> 无 <span class="d-code">-y</span> 时会问一次）</td></tr>
 <tr><td><span class="d-code">login [name ...]</span></td><td>强制重登并续期（缺省=全部）</td></tr>
 <tr><td><span class="d-code">sms</span> / <span class="d-code">verify</span></td><td>短信登录两步：发码 → 用验证码换 session</td></tr>
+<tr><td><span class="d-code">onboarding [name ...]</span></td><td>一键领取 8 个新手任务（合计 10000 积分，纯接口直领，不花模型 token）</td></tr>
 <tr><td><span class="d-code">identity &lt;name&gt;</span></td><td>查看设备标识（<span class="d-code">--rebind</span> 换新设备并重登）</td></tr>
 <tr><td><span class="d-code">models</span> / <span class="d-code">chat "prompt"</span></td><td>列上游模型 / 单次对话自检</td></tr>
 </tbody>
@@ -48,7 +49,11 @@ certutil -hashfile loomy2api.exe SHA256   # Windows</pre>
 <h3 id="d-account-sms">短信登录（没有密码时）</h3>
 <pre>./loomy2api sms 13800000000                 # 发验证码，记下输出里的 msgid
 ./loomy2api verify main 13800000000 &lt;验证码&gt; &lt;msgid&gt;</pre>
-<p>两步都在同一台机器上执行、不要间隔太久；<span class="d-code">verify</span> 成功后 session 同样写进 <span class="d-code">accounts.json</span>。这种账号没有密码，14 天到期后需要重新走一遍（或先到账号中心设密码，再改成密码账号）。</p>
+<p>两步都在同一台机器上执行、不要间隔太久；<span class="d-code">verify</span> 成功后 session 同样写进 <span class="d-code">accounts.json</span>。这种账号没有密码，14 天到期后需要重新走一遍（或先到账号中心设密码，再改成密码账号）。同样的两步在面板「添加账号」页里也有表单：点「发送验证码」→ 填码 → 点「验证并登录」，msgid 由浏览器暂存，5 分钟内有效。</p>
+
+<h3 id="d-account-onboarding">新手任务（一键领 10000 积分）</h3>
+<pre>./loomy2api onboarding            # 全部账号；也可 onboarding main 只领某一个</pre>
+<p>新号在官方客户端里有 8 个新手任务（发第一条消息、生成 PPT、创建搭子……合计 10000 积分）。完成条件由客户端本地判定、服务端只做幂等置位加积分，所以这里直接走 API 串行领取，<strong>不花一个模型 token</strong>。已完成的自动跳过（幂等重放算成功），领取后顺手刷新额度。面板总览每行账号的「领任务」按钮是同一个动作。</p>
 
 <h3 id="d-account-session">导入客户端会话 / 手写 accounts.json</h3>
 <p>本机装了并登录了 Loomy 桌面客户端时，<span class="d-code">sessions_from_client: true</span>（默认开）会自动把客户端的会话当作一个额外账号拾取进来，不需要手工干预。也可以直接写文件：</p>
@@ -183,6 +188,8 @@ export ANTHROPIC_API_KEY=not-needed</pre>
 <tr><td><span class="d-code">GET /health</span></td><td>探活：状态、可用账号数、模型数</td></tr>
 <tr><td><span class="d-code">GET /panel</span>（及 <span class="d-code">/</span>）</td><td>Web 控制面板</td></tr>
 <tr><td><span class="d-code">GET /api/panel/state</span> · <span class="d-code">/logs</span> · <span class="d-code">/models</span> · <span class="d-code">/docs</span></td><td>面板 JSON API（启用 api_keys 后需鉴权）</td></tr>
+<tr><td><span class="d-code">POST /api/panel/sms/send</span> · <span class="d-code">/sms/verify</span></td><td>面板短信登录两步（msgid 由页面暂存，5 分钟有效）</td></tr>
+<tr><td><span class="d-code">POST /api/panel/onboarding</span></td><td>一键领取 8 个新手任务（可不带 name 遍历全池）</td></tr>
 </tbody>
 </table>
 </div>
@@ -191,8 +198,8 @@ export ANTHROPIC_API_KEY=not-needed</pre>
 <h2 id="d-panel">Web 面板</h2>
 <p>打开 <span class="d-code">http://127.0.0.1:17890/panel</span>（裸 host 也是面板），六个页签：总览、添加账号、日志、模型、文档、接口速查。</p>
 <ul>
-<li><strong>总览</strong>：每个账号的可用积分（余额 + 每日赠额）、session 剩余天数、请求与扣分计数、冷却状态、设备标识；行内按钮可续期 / 换标识 / 禁用启用 / 删除。</li>
-<li><strong>添加账号</strong>：手机号 + 密码（添加后立即登录），或直接粘一个 session。</li>
+<li><strong>总览</strong>：每个账号的可用积分（余额 + 每日赠额）、session 剩余天数、请求与扣分计数、冷却状态、设备标识；行内按钮可续期 / 领任务 / 换标识 / 禁用启用 / 删除。</li>
+<li><strong>添加账号</strong>：手机号 + 密码（添加后立即登录），或直接粘一个 session；没设密码、或密码登录被风控时用下面的「短信验证码登录」表单两步走。</li>
 <li><strong>日志</strong>：网关请求日志的实时尾部（模型、token、扣分、延迟），按行高亮错误与警告。</li>
 <li><strong>模型</strong>：上游目录，带积分倍率、上下文长度、能力标签与搜索排序。</li>
 <li><strong>文档</strong>：就是本页，内容编译在二进制里，不依赖外网。</li>

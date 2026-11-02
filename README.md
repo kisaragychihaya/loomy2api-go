@@ -35,6 +35,7 @@ cp accounts.example.json accounts.json  # 存密码，已在 .gitignore 里（ad
 | `add` / `remove` | 加账号 / 删账号（`remove` 无 `-y` 时会问一次） |
 | `login [name ...]` | 强制重登并续期（缺省=全部） |
 | `sms` / `verify` | 短信登录两步：发码 → 用验证码换 session |
+| `onboarding [name ...]` | 一键领取 8 个新手任务（合计 10000 积分，纯接口直领） |
 | `identity <name>` | 查看设备标识（`--rebind` 换新设备并重登） |
 | `models` / `chat "prompt"` | 列上游模型 / 单次对话自检 |
 
@@ -75,6 +76,7 @@ go vet ./...
 | --- | --- |
 | `loomy2api/config.py` / `constants.py` | `internal/loomy/config.go` / `constants.go` |
 | `loomy2api/account.py` / `pool.py` | `internal/loomy/account.go` / `pool.go` |
+| `loomy2api/onboarding.py` | `internal/loomy/onboarding.go` |
 | `loomy2api/upstream.py` / `httpc.py` | `internal/loomy/upstream.go` / `httpc.go` |
 | `loomy2api/crypto.py` / `signer.py` / `scrypt.py` | `internal/loomy/crypto.go` / `signer.go` / `scrypt.go` |
 | `loomy2api/server.py` | `internal/loomy/server.go`（`net/http` 取代 `http.server`） |

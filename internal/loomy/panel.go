@@ -352,6 +352,133 @@ func (p *Panel) Identity(payload map[string]any) (map[string]any, error) {
 	}, nil
 }
 
+// SendSMS 对应 Python panel.send_sms：短信登录第一步 —— 发码，把 msgid 交回页面。
+//
+// msgid 由浏览器暂存（只有 5 分钟有效），第二步再单独点一次即可，服务端无需保存登录态。
+func (p *Panel) SendSMS(payload map[string]any) (map[string]any, error) {
+	phone := strings.TrimSpace(accountVal(payload, "loginid"))
+	if phone == "" {
+		phone = strings.TrimSpace(accountVal(payload, "phone"))
+	}
+	if phone == "" {
+		return nil, &PoolError{Msg: "需要手机号 / phone is required"}
+	}
+	data, err := p.pool.Client.SendSMSCode(phone, nil)
+	if err != nil {
+		return nil, &PoolError{Msg: "验证码发送失败：" + err.Error()}
+	}
+	record := jmap(data, "data")
+	if record == nil {
+		record = data
+	}
+	msgid := strings.TrimSpace(jstr(record, "msgid"))
+	if msgid == "" {
+		// 绝不把空 msgid 交回去：第二步会败在一个与真实原因无关的报错上。
+		return nil, &PoolError{Msg: "短信响应缺少 msgid（请稍后重试）"}
+	}
+	p.log(fmt.Sprintf("[panel] 已向 %s 下发短信验证码", maskPhone(phone)))
+	return map[string]any{"ok": true, "phone": phone, "msgid": msgid}, nil
+}
+
+// VerifySMS 对应 Python panel.verify_sms：短信登录第二步 —— 用验证码换 session 并存账号。
+//
+// 名字是新建就创建账号，否则刷新已有账号（所以「短信重登」对过期账号同样有效）。
+func (p *Panel) VerifySMS(payload map[string]any) (map[string]any, error) {
+	name := strings.TrimSpace(accountVal(payload, "name"))
+	if name == "" {
+		name = "main"
+	}
+	phone := strings.TrimSpace(accountVal(payload, "loginid"))
+	if phone == "" {
+		phone = strings.TrimSpace(accountVal(payload, "phone"))
+	}
+	code := strings.TrimSpace(accountVal(payload, "code"))
+	msgid := strings.TrimSpace(accountVal(payload, "msgid"))
+	if phone == "" || code == "" || msgid == "" {
+		return nil, &PoolError{Msg: "手机号 / 验证码 / msgid 都不能为空 / " +
+			"phone, code and msgid are all required"}
+	}
+	got, err := p.pool.Client.LoginBySMS(phone, code, msgid, nil)
+	if err != nil {
+		return nil, &PoolError{Msg: "短信登录失败：" + err.Error()}
+	}
+
+	acc := p.pool.Get(name)
+	created := acc == nil
+	if acc == nil {
+		acc, err = p.pool.AddAccount(name, phone, "", "", "", nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	acc.Session = got["session"]
+	if got["userid"] != "" {
+		acc.Userid = got["userid"]
+	}
+	if phone != "" {
+		acc.Loginid = phone
+	}
+	acc.ObtainedAt = time.Now().Unix()
+	acc.ExpireAt = acc.ObtainedAt + SessionExpireSeconds
+	acc.CooldownUntil = 0
+	p.pool.RefreshQuota(acc)
+	p.pool.Save(true)
+
+	var daysLeft any
+	if days, known := acc.DaysLeft(); known {
+		daysLeft = days
+	}
+	p.log(fmt.Sprintf("[panel] %s 短信登录成功 userid=%s session=%s…%s",
+		name, acc.Userid, accountPrefix(acc.Session, 8),
+		map[bool]string{true: "（新建）", false: "（续期）"}[created]))
+	return map[string]any{
+		"ok": true, "name": name, "created": created,
+		"userid": acc.Userid, "days_left": daysLeft,
+		"state": p.State(false),
+	}, nil
+}
+
+// Onboarding 对应 Python panel.onboarding：给一个（或全部）账号领取 8 个新手任务。
+//
+// 纯接口直领，不花模型 token（见 onboarding.py 的模块注释）。
+func (p *Panel) Onboarding(payload map[string]any) (map[string]any, error) {
+	name := strings.TrimSpace(accountVal(payload, "name"))
+	targets := []*Account{}
+	if name != "" {
+		acc := p.pool.Get(name)
+		if acc == nil {
+			return nil, &PoolError{Msg: fmt.Sprintf(
+				"没有名为 %s 的账号 / no such account: %s", name, name)}
+		}
+		targets = []*Account{acc}
+	} else {
+		targets = p.pool.Accounts()
+	}
+	if len(targets) == 0 {
+		return nil, &PoolError{Msg: "账号池为空 / account pool is empty"}
+	}
+
+	results := make([]any, 0, len(targets))
+	allOK := true
+	claimedPoints := 0
+	for _, acc := range targets {
+		result := OnboardingClaimForAccount(p.pool, acc, p.log)
+		results = append(results, result)
+		if jbool(result, "ok") {
+			claimedPoints += int(jint(result, "claimed_points"))
+		} else {
+			allOK = false
+		}
+	}
+	p.pool.Save(true)
+	return map[string]any{
+		"ok":             allOK,
+		"results":        results,
+		"claimed_points": claimedPoints,
+		"state":          p.State(false),
+	}, nil
+}
+
 // Logs 对应 Python 的 logs：读日志文件的尾部 N 行。
 // N 被夹在 10..2000 之间（Python 的 max(10, min(lines or 200, 2000))）。
 func (p *Panel) Logs(lines int) map[string]any {

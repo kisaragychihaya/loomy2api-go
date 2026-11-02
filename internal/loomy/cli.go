@@ -24,6 +24,7 @@ import (
 //	loomy2api login [name ...]      log in / refresh sessions
 //	loomy2api sms <phone>           send an SMS code (SMS login path)
 //	loomy2api verify <name> <phone> <code> <msgid>
+//	loomy2api onboarding [name ...] claim the 8 newbie tasks (10 000 points)
 //	loomy2api models                list upstream models
 //	loomy2api quota                 show quota of every account
 //	loomy2api chat "prompt"         one-shot chat through the gateway
@@ -289,7 +290,7 @@ type cliCommand struct {
 	run     func(c *CLI, cfg *Config, argv []string) (int, error)
 }
 
-// cliCommandList 按 cli.py build_parser 的顺序排列（共 11 个子命令）。
+// cliCommandList 按 cli.py build_parser 的顺序排列（共 12 个子命令）。
 var cliCommandList = []cliCommand{
 	{name: "serve", summary: "启动网关", usage: cliUsageServe, run: cliCmdServe},
 	{name: "accounts", summary: "查看账号池状态", usage: cliUsageAccounts, run: cliCmdAccounts},
@@ -298,6 +299,7 @@ var cliCommandList = []cliCommand{
 	{name: "login", summary: "登录/续期账号", usage: cliUsageLogin, run: cliCmdLogin},
 	{name: "sms", summary: "发短信验证码（短信登录第一步）", usage: cliUsageSms, run: cliCmdSms},
 	{name: "verify", summary: "用验证码换 session", usage: cliUsageVerify, run: cliCmdVerify},
+	{name: "onboarding", summary: "领取新手任务（8 项，合计 10000 积分）", usage: cliUsageOnboarding, run: cliCmdOnboarding},
 	{name: "identity", summary: "查看/重绑账号的设备标识", usage: cliUsageIdentity, run: cliCmdIdentity},
 	{name: "models", summary: "列出上游模型", usage: cliUsageModels, run: cliCmdModels},
 	{name: "quota", summary: "查看各账号积分", usage: cliUsageQuota, run: cliCmdQuota},
@@ -338,6 +340,7 @@ Command line interface.
     loomy2api login [name ...]      log in / refresh sessions
     loomy2api sms <phone>           send an SMS code (SMS login path)
     loomy2api verify <name> <phone> <code> <msgid>
+    loomy2api onboarding [name ...] claim the 8 newbie tasks (10 000 points)
     loomy2api models                list upstream models
     loomy2api quota                 show quota of every account
     loomy2api chat "prompt"         one-shot chat through the gateway
@@ -351,6 +354,7 @@ positional arguments:
     login               登录/续期账号
     sms                 发短信验证码（短信登录第一步）
     verify              用验证码换 session
+    onboarding          领取新手任务（8 项，合计 10000 积分）
     identity            查看/重绑账号的设备标识
     models              列出上游模型
     quota               查看各账号积分
@@ -433,6 +437,15 @@ positional arguments:
   phone
   code
   msgid
+
+options:
+  -h, --help  show this help message and exit
+`
+
+	cliUsageOnboarding = `usage: loomy2api onboarding [-h] [names ...]
+
+positional arguments:
+  names       账号名（缺省=全部）
 
 options:
   -h, --help  show this help message and exit
@@ -861,6 +874,83 @@ func cliCmdVerify(c *CLI, cfg *Config, argv []string) (int, error) {
 	pool.Save(true)
 	fmt.Fprintf(c.Out, "✓ %s 登录成功 userid=%s session=%s…\n",
 		acc.Name, acc.Userid, accountPrefix(acc.Session, 8))
+	return 0, nil
+}
+
+// ------------------------------------------------------------- onboarding
+
+// cliCmdOnboarding 对应 Python cmd_onboarding：领取 8 个新手任务 —— 纯接口直领，不花模型 token。
+func cliCmdOnboarding(c *CLI, cfg *Config, argv []string) (int, error) {
+	fs := flag.NewFlagSet("onboarding", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	pos, err := cliParse(fs, argv)
+	if err != nil {
+		return 0, err
+	}
+
+	pool, err := c.pool(cfg)
+	if err != nil {
+		return 0, err
+	}
+	names := pos
+	if len(names) == 0 {
+		for _, acc := range pool.Accounts() {
+			names = append(names, acc.Name)
+		}
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(c.Out, "账号池为空：先 `loomy2api add` 或 `loomy2api verify` 加一个账号")
+		return 1, nil
+	}
+
+	emit := func(msg string) { fmt.Fprintln(c.Out, msg) }
+	totalPoints := 0
+	failed := 0
+	for _, name := range names {
+		acc := pool.Get(name)
+		if acc == nil {
+			fmt.Fprintf(c.Out, "✗ 没有名为 %s 的账号\n", name)
+			failed++
+			continue
+		}
+		fmt.Fprintf(c.Out, "—— %s ——\n", name)
+		result := OnboardingClaimForAccount(pool, acc, emit)
+		if !jbool(result, "ok") {
+			fmt.Fprintf(c.Out, "✗ %s: %s\n", name, jstr(result, "error"))
+			failed++
+			continue
+		}
+		for _, item := range result["claimed"].([]map[string]any) {
+			flag := ""
+			if jbool(item, "already_completed") {
+				flag = "（此前已完成，幂等重放）"
+			}
+			fmt.Fprintf(c.Out, "  ✓ %s +%d%s\n", jstr(item, "title"), jint(item, "points"), flag)
+		}
+		if skipped, ok := result["skipped"].([]string); ok && len(skipped) > 0 {
+			titles := make([]string, 0, len(skipped))
+			for _, key := range skipped {
+				titles = append(titles, OnboardingTaskTitles[key])
+			}
+			fmt.Fprintf(c.Out, "  · 已完成跳过 %d 项：%s\n", len(skipped), strings.Join(titles, "、"))
+		}
+		for _, item := range result["failed"].([]map[string]any) {
+			fmt.Fprintf(c.Out, "  ✗ %s：%s\n", jstr(item, "title"), jstr(item, "error"))
+		}
+		totalPoints += int(jint(result, "claimed_points"))
+		fmt.Fprintf(c.Out, "  本次 +%d，累计 %d/%d\n",
+			jint(result, "claimed_points"), jint(result, "earned"), jint(result, "total"))
+	}
+	pool.Save(true)
+	fmt.Fprintln(c.Out, strings.Repeat("-", 50))
+	summary := fmt.Sprintf("合计本次领取 %d 积分（满分 %d）", totalPoints, OnboardingTotal)
+	if failed > 0 {
+		summary += fmt.Sprintf("，%d 个账号失败", failed)
+	}
+	fmt.Fprintln(c.Out, summary)
+	if failed > 0 {
+		return 1, nil
+	}
 	return 0, nil
 }
 
